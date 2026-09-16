@@ -1,0 +1,15 @@
+# 런타임에 자동 생성되는 파일 (커밋 불필요)
+checkpoints.sqlite
+checkpoints.sqlite-wal
+checkpoints.sqlite-shm
+chroma_db/
+__pycache__/
+*.pyc
+
+# 평가 실행 결과 (실행할 때마다 새로 생성됨, run_eval.py로 재생성 가능)
+evaluation/eval_results.jsonl
+evaluation/eval_run.log
+
+# 미들웨어 실행 로그 (LoggingMiddleware, guards_refusal.py가 실행할 때마다 생성)
+agent_log.jsonl
+guard_audit.log

@@ -1,0 +1,82 @@
+[
+  {
+    "name": "김삼성",
+    "preferred_menus": ["한식", "분식"],
+    "constraints": {
+      "max_round_trip_minutes": 20,
+      "avoid_menus": [],
+      "last_menu": "김치찌개",
+      "health_notes": []
+    }
+  },
+  {
+    "name": "송덕삼",
+    "preferred_menus": ["국물류", "한식"],
+    "constraints": {
+      "max_round_trip_minutes": null,
+      "avoid_menus": ["뼈해장국"],
+      "last_menu": "냉면",
+      "health_notes": ["고나트륨 주의"]
+    }
+  },
+  {
+    "name": "이나래",
+    "preferred_menus": ["양식", "샐러드"],
+    "constraints": {
+      "max_round_trip_minutes": 15,
+      "avoid_menus": ["튀김류"],
+      "last_menu": null,
+      "health_notes": ["당뇨"]
+    }
+  },
+  {
+    "name": "박도윤",
+    "preferred_menus": ["중식"],
+    "constraints": {
+      "max_round_trip_minutes": 25,
+      "avoid_menus": [],
+      "last_menu": "짜장면",
+      "health_notes": []
+    }
+  },
+  {
+    "name": "최민준",
+    "preferred_menus": ["일식", "분식"],
+    "constraints": {
+      "max_round_trip_minutes": 20,
+      "avoid_menus": ["회"],
+      "last_menu": "돈까스",
+      "health_notes": ["날것 주의"]
+    }
+  },
+  {
+    "name": "수퍼맨",
+    "preferred_menus": [],
+    "constraints": {
+      "max_round_trip_minutes": null,
+      "avoid_menus": [],
+      "last_menu": null,
+      "health_notes": []
+    }
+  },
+  {
+    "name": "사장님",
+    "preferred_menus": ["회"],
+    "constraints": {
+      "max_round_trip_minutes": null,
+      "avoid_menus": [],
+      "last_menu": null,
+      "health_notes": []
+    }
+  },
+  {
+    "name": "박골절",
+    "preferred_menus": ["한식", "양식", "일식", "분식"],
+    "constraints": {
+      "max_round_trip_minutes": 3,
+      "avoid_menus": [],
+      "last_menu": null,
+      "health_notes": []
+    }
+  }
+]
