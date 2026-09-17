@@ -35,6 +35,36 @@ MENUS = _load(MENUS_PATH)
 
 UPDATABLE_FIELDS = {"preferred_menus", "max_round_trip_minutes", "avoid_menus", "last_menu", "health_notes"}
 CONSTRAINT_FIELDS = {"max_round_trip_minutes", "avoid_menus", "last_menu", "health_notes"}
+LIST_FIELDS = {"preferred_menus", "avoid_menus", "health_notes"}
+# 점심시간 왕복 이동시간의 상식적인 상한. 이보다 큰 값은 실존하지 않는 개념(예: "나트륨
+# 5000mg 제한")을 이 필드에 억지로 끼워맞춘 경우일 가능성이 높다.
+MAX_ROUND_TRIP_MINUTES_CAP = 180
+
+
+def _validate_field_value(field: str, value) -> str | None:
+    """value가 field의 실제 의미에 맞는 타입/범위인지 검사한다. 문제없으면 None, 문제가
+    있으면 사용자에게 보여줄 오류 메시지를 반환한다.
+    """
+    if field == "max_round_trip_minutes":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return f"max_round_trip_minutes는 분 단위 숫자여야 합니다 (받은 값: {value!r})."
+        if not (1 <= value <= MAX_ROUND_TRIP_MINUTES_CAP):
+            return (
+                f"max_round_trip_minutes 값 {value}은(는) 상식적인 범위(1~"
+                f"{MAX_ROUND_TRIP_MINUTES_CAP}분)를 벗어납니다. 요청하신 내용이 실제로는 "
+                "이동시간이 아닌 다른 개념(예: 나트륨 수치)이라면, 그런 필드는 존재하지 않는다고 "
+                "안내해야 합니다."
+            )
+        return None
+    if field == "last_menu":
+        if not isinstance(value, str) or not value.strip():
+            return f"last_menu는 비어있지 않은 문자열이어야 합니다 (받은 값: {value!r})."
+        return None
+    if field in LIST_FIELDS:
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            return f"{field}는 문자열 리스트여야 합니다 (받은 값: {value!r})."
+        return None
+    return None
 
 
 @mcp.tool()
@@ -133,10 +163,17 @@ def get_group_constraints(names: list[str]) -> str:
 
 @mcp.tool()
 def update_user_preference(name: str, field: str, value) -> str:
-    """이미 등록된 사용자의 선호·제약 정보를 수정한다.
+    """이미 등록된 사용자의 선호·제약 정보를 이번 세션 동안만 임시로 수정한다.
 
-    되돌리기 어려운 변경이므로, 이 도구를 호출하기 전에 반드시 사람의 승인을 받아야 한다
-    (에이전트 레이어의 HITL 게이트가 이를 강제한다 — 이 함수 자체는 승인 여부를 판단하지 않는다).
+    이 도구는 실제 사용자 DB(data/users.json) 파일을 절대 건드리지 않는다 — 실제 DB 수정은
+    별도의 DB 관리 솔루션(이 프로젝트 범위 밖)의 몫이고, 이 Agent는 사람이 승인하더라도 DB를
+    직접 고치지 않는다. 여기서 하는 일은 지금 떠 있는 MCP 서버 프로세스의 메모리 상 값만
+    바꾸는 것이라, 이 프로세스가 재시작되면(=새 세션이 시작되면) 원래 값으로 돌아간다.
+
+    되돌리기 어려운 변경은 아니지만(세션이 끝나면 자동으로 사라짐), 그래도 사용자가 눈치채지
+    못하는 사이에 조건이 바뀌면 안 되므로, 이 도구를 호출하기 전에 반드시 사람의 승인을 받아야
+    한다 (에이전트 레이어의 HITL 게이트가 이를 강제한다 — 이 함수 자체는 승인 여부를 판단하지
+    않는다).
 
     어떠한 경우에도 새 사용자를 추가하거나 기존 사용자를 삭제하지 않는다 — 등록된 사용자의
     필드 값만 바꾼다. name이 등록되지 않은 이름이면 새로 만들지 않고 실패로 처리한다.
@@ -149,15 +186,23 @@ def update_user_preference(name: str, field: str, value) -> str:
     if field not in UPDATABLE_FIELDS:
         return f"'{field}'는 수정 가능한 항목이 아닙니다. 가능한 항목: {', '.join(sorted(UPDATABLE_FIELDS))}"
 
+    # 프롬프트 지시만으로는, 존재하지 않는 개념(예: "나트륨 5000mg 제한")을 모델이 기존 필드에
+    # 억지로 끼워맞춰 호출하는 경우를 막지 못했다 (max_round_trip_minutes에 5000을 넣거나,
+    # health_notes에 "나트륨 5000mg 제한" 같은 지어낸 문구를 넣는 식). 여기서 타입/범위를
+    # 검증해 이런 값이 실제로 저장되기 전에 걸러낸다.
+    error = _validate_field_value(field, value)
+    if error:
+        return error
+
     for user in USERS:
         if user["name"] == name:
             if field in CONSTRAINT_FIELDS:
                 user["constraints"][field] = value
             else:
                 user[field] = value
-            with open(USERS_PATH, "w", encoding="utf-8") as f:
-                json.dump(USERS, f, ensure_ascii=False, indent=2)
-            return f"'{name}'의 {field}를(을) {value}로 수정했습니다."
+            # 의도적으로 파일에 쓰지 않는다 — data/users.json(실제 DB)은 절대 수정하지 않고,
+            # 이번 세션(현재 MCP 서버 프로세스) 메모리에만 반영해 다음 조회부터 임시로 적용되게 한다.
+            return f"'{name}'의 {field}를(을) {value}로 (이번 세션 동안만) 수정했습니다."
     names = ", ".join(u["name"] for u in USERS)
     return f"'{name}' 사용자를 찾을 수 없습니다. 등록된 사용자: {names}"
 

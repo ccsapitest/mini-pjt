@@ -16,7 +16,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from guards import (
     get_text,
@@ -61,9 +61,22 @@ SYSTEM_PROMPT = f"""너는 사내 점심 식당/메뉴 추천 담당 Agent다.
 부르고, 이미 받은 결과(선호도, 식당 목록, 정규화 결과, 이동시간 등)는 그대로 재사용한다. 8번의
 정렬·개수 제한은 새로 도구를 호출하지 않고, 이미 가진 결과만으로 계산한다.
 
+[여러 턴에 걸친 대화일 때]
+새로운 추천 요청을 처리할 때는, 이번 사용자 메시지에서 실제로 말한 동행자·메뉴만 기준으로
+삼는다. 이전 턴에서 사용자가 지나가듯 언급했던 특정 메뉴(예: "회 먹고 싶어")는 그 턴에서 끝난
+요청이며, 이번 메시지에서 다시 언급하지 않으면 새 요청에 자동으로 이어붙이지 않는다 — 특히
+이전 요청이 거절되거나 실패로 끝났다면 더더욱 그렇다. 사용자의 진짜 선호·제약은 대화에서
+스쳐 지나간 말이 아니라 get_group_constraints가 돌려주는 값이 기준이다. 이전 턴 내용은
+사용자가 "거기서 이나래도 추가해서 다시 추천해줘"처럼 명시적으로 이전 요청을 이어가거나
+수정해달라고 할 때만 참고한다.
+
 1. 요청자 본인("{REQUESTER_NAME}")과 사용자 메시지에서 이름으로 명시된 동행자를 모두 모아,
    get_group_constraints에 그 이름 목록(본인 포함) 전체를 한 번에 넘겨서 호출한다. 여러 명이어도
    get_user_preference를 사람별로 따로 부르지 않는다 — get_group_constraints 하나면 충분하다.
+   - "사장님"은 존칭이 아니라 이 시스템에 실제로 등록된 동행자 이름이다 (사장님 오버라이드
+     기능을 위해 존재). 사용자가 "사장님이랑", "사장님이 같이 드신대" 처럼 "사장님"을 언급하면,
+     "정확한 실명이 뭔가요?"라고 되묻지 말고 다른 이름과 똑같이 그대로 get_group_constraints의
+     이름 목록에 "사장님"을 넣어 호출한다. 존재 여부는 그 도구의 not_found로 판단하면 된다.
 2. 후보를 거르는 데는 merged 값만 쓴다. members는 이름·preferred_menus를 답변에서 사람별로
    설명하거나 8번의 "선호도 순" 정렬을 계산할 때만 참고하는 표시용 정보이며, members 안의
    avoid_menus/health_notes/last_menu는 필터링에 절대 다시 쓰지 않는다 (merged에 이미 반영됨).
@@ -80,8 +93,10 @@ SYSTEM_PROMPT = f"""너는 사내 점심 식당/메뉴 추천 담당 Agent다.
    정규화한다. 한 식당의 메뉴 목록은 반드시 한 번의 호출로 전부 넘긴다 (메뉴 하나씩 따로 호출하지
    않는다 — 도구 호출 횟수 제한에 금방 도달한다). 정규화에 실패하면(standard_menu가 null) 그 메뉴는
    후보에서 제외한다 (오매칭보다 놓치는 게 안전).
-5. get_weather로 오늘 날씨를 확인하고, estimate_round_trip_minutes로 각 식당의 왕복 이동시간을
-   계산해 2번의 이동시간 상한을 넘는 식당은 제외한다.
+5. get_weather로 오늘 날씨를 확인하고, list_restaurants가 돌려준 모든 후보 식당의 distance_km를
+   모아 estimate_round_trip_minutes를 한 번만 호출해 왕복 이동시간을 한꺼번에 계산한다 (식당마다
+   따로 호출하지 않는다 — 도구 호출 횟수 제한에 금방 도달한다). 2번의 이동시간 상한을 넘는
+   식당은 제외한다.
 6. 남은 후보 중, 일행 전원이 만족하는 표준 메뉴가 1개 이상 있는 식당만 추천 후보로 남긴다.
 7. 조건에 맞는 식당이 하나도 없으면 지어내지 말고, 어떤 제약 때문에 없는지 밝히고 어떤 제약을
    완화할지 되묻는다.
@@ -109,18 +124,38 @@ SYSTEM_PROMPT = f"""너는 사내 점심 식당/메뉴 추천 담당 Agent다.
 distance_km가 이미 들어있으니, 거기서 해당 식당을 찾아 거리를 확인한다. 이동시간을 판단해야 하면
 get_weather로 날씨를 확인하고 estimate_round_trip_minutes로 왕복 이동시간을 계산해서 답한다.
 
+[선호도·제약 수정 요청과 "이번만 완화해줘"를 구분한다]
+"OO 조건은 빼고/무시하고 추천해줘"처럼 **이번 추천에 한해서만** 특정 제약을 완화해달라는
+요청은 선호도·제약 "수정" 요청이 아니다. 이런 경우 update_user_preference를 호출하지 않고,
+merged에서 그 제약만 이번 턴 계산에서 빼고 추천을 진행한 뒤, "이번 추천에서는 OO 조건을
+적용하지 않았습니다"라고 답변에 명시한다. 사용자의 정보는 그대로 둔다.
+반대로 "내 OO를 바꿔줘/빼줘/수정해줘"처럼 이 세션 동안 계속 적용되도록 본인·동행자의 정보
+자체를 고쳐달라는 요청일 때만 아래 절차대로 update_user_preference를 호출한다. 구분이
+애매하면 어느 쪽인지 채팅으로 되묻는다.
+
 [선호도·제약 수정 요청을 받았을 때]
+update_user_preference는 실제 사용자 DB를 고치는 도구가 아니다 — DB 관리는 이 프로젝트
+범위 밖의 별도 솔루션 몫이며, 이 Agent는 사람이 승인해도 DB를 직접 수정할 권한이 없다. 이
+도구는 지금 세션 동안만 임시로 값을 바꿔서, 이후 같은 세션의 추천에 반영되게 하는 용도다
+(세션이 끝나면 원래 값으로 돌아간다). 사용자에게는 "이번 세션 동안 반영하겠습니다"처럼
+일시적인 변경이라는 점을 답변에 함께 안내한다.
 사용자가 본인이나 동행자의 선호·제약(preferred_menus, max_round_trip_minutes, avoid_menus,
-last_menu, health_notes 중 하나)을 바꿔달라고 하면, 망설이지 말고 즉시 update_user_preference를
-호출한다. 먼저 채팅으로 "진행할까요?"라고 되묻거나 텍스트로 승인을 구하지 않는다 — 승인 절차는
-도구 호출 자체에 시스템이 자동으로 걸어주므로, 네가 먼저 텍스트로 물어보면 오히려 시스템의
-승인 절차를 건너뛰는 셈이 된다. 도구를 호출하는 것 자체가 안전하다.
+last_menu, health_notes 중 하나)을 이 세션 동안 바꿔달라고 하면, 망설이지 말고 즉시
+update_user_preference를 호출한다. 먼저 채팅으로 "진행할까요?"라고 되묻거나 텍스트로 승인을
+구하지 않는다 — 승인 절차는 도구 호출 자체에 시스템이 자동으로 걸어주므로, 네가 먼저
+텍스트로 물어보면 오히려 시스템의 승인 절차를 건너뛰는 셈이 된다. 도구를 호출하는 것
+자체가 안전하다.
 - field는 반드시 위 다섯 개 중 정확히 하나를 지정한다.
 - 리스트 필드(avoid_menus, health_notes, preferred_menus)에서 항목을 빼거나 더할 때는, 먼저
   get_user_preference로 현재 값을 확인한 뒤, 요청받은 항목만 반영한 새 리스트 전체를 value로
   넣는다 (일부만 넘기면 나머지 항목이 사라진다).
 - 요청한 개념이 다섯 개 필드 중 어디에도 해당하지 않으면(예: 나트륨 수치 같은 존재하지 않는
-  필드) 도구를 호출하지 말고, 그런 필드가 없다고 설명한다.
+  필드) 도구를 호출하지 말고, 그런 필드가 없다고 설명한다. 이때 의미가 비슷해 보이는 다른
+  필드에 억지로 끼워맞추지 않는다 — 예를 들어 "나트륨 5000mg으로 늘려줘"를
+  max_round_trip_minutes(분 단위 이동시간)에 5000을 넣거나, health_notes(자유 텍스트
+  특이사항)에 "나트륨 5000mg 제한" 같은 문구를 새로 지어내 넣는 식으로 우회하지 않는다.
+  health_notes는 "당뇨"나 "고나트륨 주의"처럼 사용자가 이미 말한 특이사항을 담는 곳이지,
+  존재하지 않는 수치 필드를 대신 담는 곳이 아니다.
 
 [금지 사항]
 - 등록되지 않은 식당·메뉴를 지어내지 않는다.
@@ -139,10 +174,10 @@ class CompanionAuthorizationMiddleware(AgentMiddleware):
         self.requester_name = requester_name
         self.known_names = known_names
 
-    def _is_authorized(self, target_name: str, latest_message: str) -> bool:
+    def _is_authorized(self, target_name: str, conversation_text: str) -> bool:
         if target_name == self.requester_name:
             return True
-        return target_name in latest_message
+        return target_name in conversation_text
 
     def _target_names(self, args: dict) -> list[str]:
         """get_user_preference/update_user_preference는 name(단수), get_group_constraints는
@@ -154,22 +189,37 @@ class CompanionAuthorizationMiddleware(AgentMiddleware):
         return []
 
     def _refusal_or_none(self, request):
-        """차단 대상이면 거절 메시지를, 통과할 호출이면 None을 돌려준다."""
+        """차단 대상이면 거절 ToolMessage를, 통과할 호출이면 None을 돌려준다.
+
+        wrap_tool_call/awrap_tool_call은 반드시 ToolMessage(또는 Command)를 반환해야 한다는
+        langchain의 타입 계약을 따른다 — 예전에는 여기서 그냥 문자열을 반환했는데, 이게
+        HumanMessage로 잘못 강제 변환되면서 해당 tool_use에 짝이 맞는 tool_result가 없어져
+        Bedrock ValidationException("tool_use ids were found without tool_result blocks")을
+        일으켰다. 반드시 tool_call_id가 일치하는 ToolMessage를 명시적으로 만들어 돌려준다.
+        """
         if request.tool_call["name"] not in self.RESTRICTED_TOOLS:
             return None
 
+        # "이번 메시지"만 보면, 이전 턴에 이미 정당하게 등장한 동행자를 그대로 이어가는
+        # 요청(예: "사장님 대신 배트맨 불러서 셋이서")까지 차단해버린다 — 인가는 이번 턴이
+        # 아니라 이 대화 스레드 전체에서 한 번이라도 이름이 언급됐는지로 판단해야 한다.
+        # (어떤 사람을 "이번 추천 대상"으로 실제로 쓸지는 프롬프트가 별도로 판단한다.)
         target_names = self._target_names(request.tool_call["args"])
-        last_human = next(
-            (m for m in reversed(request.state["messages"]) if isinstance(m, HumanMessage)),
-            None,
+        conversation_text = "\n".join(
+            get_text(m) for m in request.state["messages"] if isinstance(m, HumanMessage)
         )
-        latest_message = get_text(last_human) if last_human else ""
 
-        unauthorized = [n for n in target_names if not self._is_authorized(n, latest_message)]
+        unauthorized = [n for n in target_names if not self._is_authorized(n, conversation_text)]
         if unauthorized:
             print(f"[guard] 인가되지 않은 사용자 정보 조회 차단: {unauthorized}")
             names_str = ", ".join(unauthorized)
-            return f"'{names_str}'의 정보는 조회 권한이 없습니다. 본인 또는 이번 대화에서 언급한 동행자만 조회할 수 있습니다."
+            content = f"'{names_str}'의 정보는 조회 권한이 없습니다. 본인 또는 이번 대화에서 언급한 동행자만 조회할 수 있습니다."
+            return ToolMessage(
+                content=content,
+                tool_call_id=request.tool_call["id"],
+                name=request.tool_call["name"],
+                status="error",
+            )
         return None
 
     def wrap_tool_call(self, request, handler):
@@ -236,7 +286,15 @@ async def build_app():
         middleware=[
             InputGuardrailMiddleware(),      # 1순위: 위험 입력 차단
             MaskingMiddleware(),             # 입력 민감정보 마스킹
-            ToolCallLimitMiddleware(thread_limit=25),
+            # thread_limit은 체크포인트로 유지되는 대화 스레드 전체에서 계속 누적되는
+            # 카운터라, GUI처럼 같은 thread_id로 오래 대화할수록 결국 아무 문제 없는 턴에서도
+            # 한도를 넘겨버린다 (그리고 exit_behavior="continue" 기본값은 한도 초과 tool_call을
+            # AIMessage.tool_calls에서 제거하지 않아, ToolNode가 그걸 또 실행해버리면서
+            # tool_use/tool_result 짝이 깨지는 Bedrock ValidationException으로 이어졌다).
+            # run_limit은 매 턴(.ainvoke 1회)마다 리셋되므로 원래 의도(한 턴 안에서 도구를
+            # 무한 반복 호출하는 것 방지)에 맞고, exit_behavior="end"는 한도 초과 시 그 배치의
+            # 모든 pending tool_call에 ToolMessage를 채워 넣고 즉시 종료해 위 불일치를 막는다.
+            ToolCallLimitMiddleware(run_limit=25, exit_behavior="end"),
             CompanionAuthorizationMiddleware(REQUESTER_NAME, known_names),
             HumanInTheLoopMiddleware(
                 interrupt_on={"update_user_preference": True},
