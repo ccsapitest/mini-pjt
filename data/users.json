@@ -78,5 +78,15 @@
       "last_menu": null,
       "health_notes": []
     }
+  },
+  {
+    "name": "전가열",
+    "preferred_menus": [],
+    "constraints": {
+      "max_round_trip_minutes": 30,
+      "avoid_menus": ["회"],
+      "last_menu": null,
+      "health_notes": ["과식주의"]
+    }
   }
 ]

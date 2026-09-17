@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from agent import build_app, shutdown  # noqa: E402
+from agent import build_app, shutdown, CHECKPOINT_PATH  # noqa: E402
 from guards import get_text  # noqa: E402
 from langchain_core.messages import HumanMessage  # noqa: E402
 
@@ -22,7 +22,22 @@ CSV_PATH = os.path.join(BASE, "test_queries.csv")
 OUT_PATH = os.path.join(BASE, "eval_results.jsonl")
 
 
+def _reset_checkpoints():
+    """이전 실행의 대화 상태(체크포인트)를 지운다.
+
+    run_eval.py는 매번 같은 thread_id(eval_1, eval_2, ...)를 쓰는데, checkpoints.sqlite를
+    안 지우면 이전 실행의 대화 기록·도구 호출 횟수·중단된(interrupt) 상태가 그대로 남아있어서
+    재실행할 때마다 결과가 누적되거나 예전에 깨졌던 상태가 그대로 재생된다. 매 평가는
+    깨끗한 상태에서 시작해야 한다.
+    """
+    for suffix in ("", "-wal", "-shm"):
+        path = CHECKPOINT_PATH + suffix
+        if os.path.exists(path):
+            os.remove(path)
+
+
 async def run():
+    _reset_checkpoints()
     agent = await build_app()
     try:
         await _run_rows(agent)

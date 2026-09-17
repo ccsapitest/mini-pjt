@@ -22,7 +22,7 @@
   {"name": "비빔만두", "calories": 400, "sodium_mg": 900, "caution": "특이사항 없음"},
   {"name": "냉국수", "calories": 400, "sodium_mg": 800, "caution": "특이사항 없음"},
   {"name": "파스타", "calories": 500, "sodium_mg": 700, "caution": "유제품 포함, 고지방 주의"},
-  {"name": "카레", "calories": 483, "sodium_mg": 800, "caution": "특이사항 없음"},
+  {"name": "카레", "aliases": ["커리"], "calories": 483, "sodium_mg": 800, "caution": "특이사항 없음"},
   {"name": "회덮밥", "calories": 465, "sodium_mg": 1160, "caution": "날것 주의"},
   {"name": "뼈매운탕", "calories": 426, "sodium_mg": 1450, "caution": "고나트륨 주의 (추정치, 매운탕 일반 자료 기준)"},
   {"name": "물냉면", "calories": 500, "sodium_mg": 2600, "caution": "고나트륨 주의"},

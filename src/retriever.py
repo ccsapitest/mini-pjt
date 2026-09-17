@@ -29,6 +29,36 @@ PERSIST_DIR = os.path.join(BASE, "..", "chroma_db")
 NAME_MATCH_THRESHOLD = 0.30
 CAUTION_MATCH_THRESHOLD = 0.5
 
+def _load_keyword_map() -> dict:
+    """표준 메뉴명·별칭 -> 메뉴 dict. 정확한 문자열 포함 매칭에 쓴다 (임베딩 호출 불필요)."""
+    with open(MENUS_PATH, encoding="utf-8") as f:
+        menus = json.load(f)
+    keyword_map = {}
+    for menu in menus:
+        keyword_map[menu["name"]] = menu
+        for alias in menu.get("aliases", []):
+            keyword_map[alias] = menu
+    return keyword_map
+
+
+_KEYWORD_MAP = _load_keyword_map()
+
+
+def _exact_match(query: str) -> dict | None:
+    """표준 메뉴명이나 별칭이 질의에 그대로 포함되어 있으면 그 메뉴를 확정 반환한다.
+
+    예: "에비덴 왕새우 커리"에 별칭 "커리"가 그대로 들어있으므로 "카레"로 확정 매칭한다.
+    공백은 무시하고 비교한다 (예: "우거지 뼈 해장국"과 표준명 "뼈해장국"의 띄어쓰기 차이).
+    임베딩 유사도보다 정확한 문자열 포함이 항상 더 신뢰할 수 있어 먼저 확인한다.
+    """
+    normalized_query = query.replace(" ", "")
+    # 긴 키워드부터 확인해 "치즈돈까스"가 "돈까스"보다 먼저 매칭되게 한다.
+    for keyword in sorted(_KEYWORD_MAP, key=len, reverse=True):
+        if keyword.replace(" ", "") in normalized_query:
+            return _KEYWORD_MAP[keyword]
+    return None
+
+
 _embeddings = None
 _vectorstore = None
 # 에이전트가 한 턴에 여러 도구를 병렬(스레드풀)로 호출할 때, _vectorstore가 아직 비어있으면
@@ -59,13 +89,17 @@ def _build_vectorstore() -> Chroma:
     with open(MENUS_PATH, encoding="utf-8") as f:
         menus = json.load(f)
 
-    documents = [
-        Document(
-            page_content=f"{menu['name']}: {menu['caution']}",
-            metadata=menu,
-        )
-        for menu in menus
-    ]
+    documents = []
+    for menu in menus:
+        aliases = menu.get("aliases", [])
+        # "커리"처럼 식당에서 자주 쓰는 동의어를 문서 텍스트에 포함시켜야 유사도 검색이
+        # 그 표현으로 물어봐도 정답을 찾는다 (예: "카레" <-> "커리").
+        display_name = f"{menu['name']}({', '.join(aliases)})" if aliases else menu["name"]
+        documents.append(Document(
+            page_content=f"{display_name}: {menu['caution']}",
+            # Chroma 메타데이터는 리스트를 못 받으므로 aliases는 콤마로 이어 붙인 문자열로 저장한다.
+            metadata={**menu, "aliases": ", ".join(aliases)},
+        ))
     ids = [menu["name"] for menu in menus]
 
     store = Chroma(
@@ -88,6 +122,14 @@ def _build_vectorstore() -> Chroma:
 
 
 def _normalize_one(restaurant_menu_name: str) -> dict:
+    exact = _exact_match(restaurant_menu_name)
+    if exact is not None:
+        return {
+            "restaurant_menu_name": restaurant_menu_name,
+            "standard_menu": exact,
+            "match_score": 1.0,
+        }
+
     results = _get_vectorstore().similarity_search_with_relevance_scores(
         restaurant_menu_name, k=1
     )
