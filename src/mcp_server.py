@@ -1,6 +1,7 @@
 # mcp_server.py - 점심 식당 추천 Agent용 구조화 데이터 MCP 서버 (fastmcp)
 """노출하는 도구:
-  - get_user_preference(name)                사용자 선호·제약 조회
+  - get_user_preference(name)                사용자 선호·제약 조회 (1명)
+  - get_group_constraints(names)             일행 전체 조회 + 병합(사장님 오버라이드 포함)까지 한 번에
   - update_user_preference(name, field, value) 사용자 선호·제약 수정 (되돌리기 어려움, HITL 필수)
   - list_restaurants(max_distance_km)         식당 목록 조회
   - get_menu(name)                            표준 메뉴 조회 (칼로리/나트륨/주의사항)
@@ -51,6 +52,83 @@ def get_user_preference(name: str) -> str:
             return json.dumps(user, ensure_ascii=False)
     names = ", ".join(u["name"] for u in USERS)
     return f"'{name}' 사용자를 찾을 수 없습니다. 등록된 사용자: {names}"
+
+
+@mcp.tool()
+def get_group_constraints(names: list[str]) -> str:
+    """일행 전체(요청자 본인 포함)의 선호·제약을 조회하고, 그룹 기준으로 병합까지 끝낸 결과를 돌려준다.
+
+    사람마다 get_user_preference를 따로 부르고 병합 규칙(최솟값/합집합/사장님 오버라이드)을
+    직접 계산하지 않는다 — 이 도구가 이미 다 계산해서 "merged" 안에 넣어준다. 그룹 추천을 할
+    때는 반드시 이 도구 하나만 부르고, merged 값을 그대로 필터링 기준으로 쓴다.
+
+    병합 규칙 (이미 적용되어 있음, 다시 계산하지 않는다):
+    - 동행자 중 "사장님"이 있으면, 사장님 외 다른 모든 사람의 선호·제약은 전부 무시한다.
+      "선호 vs 회피"처럼 정면으로 충돌하는 것처럼 보여도 예외 없이 사장님만 따른다
+      (merged.override_by 가 "사장님"으로 표시된다). 이때 members 목록에서도 사장님이
+      아닌 사람들의 avoid_menus/health_notes/last_menu는 아예 빠지고 이름과 선호메뉴만
+      남는다 — 애초에 참고할 회피 정보가 없으니 "충돌"을 재해석할 필요도 없다.
+    - 사장님이 없으면: 왕복 이동시간 상한은 값이 있는 사람들 중 최솟값(없는 사람은 제외),
+      회피 메뉴·어제 먹은 메뉴·특이사항은 전원의 값을 합집합으로 합친다.
+
+    Args:
+        names: 요청자 본인을 포함한 일행 전체의 이름 목록
+    """
+    members = []
+    not_found = []
+    for name in names:
+        user = next((u for u in USERS if u["name"] == name), None)
+        if user is None:
+            not_found.append(name)
+        else:
+            members.append(user)
+
+    if not members:
+        registered = ", ".join(u["name"] for u in USERS)
+        return json.dumps(
+            {"not_found": not_found, "merged": None, "note": f"등록된 사용자: {registered}"},
+            ensure_ascii=False,
+        )
+
+    boss = next((u for u in members if u["name"] == "사장님"), None)
+    if boss is not None:
+        merged = {
+            "override_by": "사장님",
+            "preferred_menus": boss["preferred_menus"],
+            "max_round_trip_minutes": boss["constraints"]["max_round_trip_minutes"],
+            "avoid_menus": boss["constraints"]["avoid_menus"],
+            "last_menus": [boss["constraints"]["last_menu"]] if boss["constraints"]["last_menu"] else [],
+            "health_notes": boss["constraints"]["health_notes"],
+        }
+        # 사장님 오버라이드 시에는 다른 동행자의 회피 메뉴/특이사항/최근 메뉴를 응답에서
+        # 아예 빼버린다. 모델이 이 원본 데이터를 보면 merged가 이미 무시하기로 한 "충돌"을
+        # 스스로 다시 찾아내서 추천을 거부하는 문제가 있었기 때문이다 (프롬프트 지시만으로는
+        # 해결되지 않음 — 데이터 자체를 안 보이게 해야 한다).
+        members = [
+            u if u["name"] == "사장님" else {"name": u["name"], "preferred_menus": u["preferred_menus"]}
+            for u in members
+        ]
+    else:
+        caps = [
+            u["constraints"]["max_round_trip_minutes"]
+            for u in members
+            if u["constraints"]["max_round_trip_minutes"] is not None
+        ]
+        merged = {
+            "override_by": None,
+            "preferred_menus": sorted({m for u in members for m in u["preferred_menus"]}),
+            "max_round_trip_minutes": min(caps) if caps else None,
+            "avoid_menus": sorted({m for u in members for m in u["constraints"]["avoid_menus"]}),
+            "last_menus": sorted({
+                u["constraints"]["last_menu"] for u in members if u["constraints"]["last_menu"]
+            }),
+            "health_notes": sorted({n for u in members for n in u["constraints"]["health_notes"]}),
+        }
+
+    return json.dumps(
+        {"not_found": not_found, "members": members, "merged": merged},
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()

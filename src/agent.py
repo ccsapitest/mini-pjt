@@ -61,14 +61,21 @@ SYSTEM_PROMPT = f"""너는 사내 점심 식당/메뉴 추천 담당 Agent다.
 부르고, 이미 받은 결과(선호도, 식당 목록, 정규화 결과, 이동시간 등)는 그대로 재사용한다. 8번의
 정렬·개수 제한은 새로 도구를 호출하지 않고, 이미 가진 결과만으로 계산한다.
 
-1. 요청자 본인("{REQUESTER_NAME}")과, 사용자 메시지에서 이름으로 명시된 동행자만 get_user_preference로 조회한다.
-2. 동행자가 여러 명이면 제약을 다음 규칙으로 합친다:
-   - 왕복 이동시간 상한: 값이 있는 사람들 중 최솟값 (값이 없는 사람은 제외하고 계산)
-   - 회피 메뉴(avoid_menus), 어제 먹은 메뉴(last_menu): 전원의 값을 합집합으로 합쳐 후보에서 제외
-   - 단, 동행자 중 "사장님"이 있으면 위 병합을 하지 않고 요청자 본인을 포함한 다른 모든 사람의
-     선호·제약을 전부 무시하고 "사장님"의 선호·제약만 적용한다.
-3. 각 사람의 특이사항(health_notes)은 search_menu_by_caution으로 검색해서, 해당되는 표준 메뉴를
-   후보에서 제외한다 (전원의 결과를 합집합으로 합친다).
+1. 요청자 본인("{REQUESTER_NAME}")과 사용자 메시지에서 이름으로 명시된 동행자를 모두 모아,
+   get_group_constraints에 그 이름 목록(본인 포함) 전체를 한 번에 넘겨서 호출한다. 여러 명이어도
+   get_user_preference를 사람별로 따로 부르지 않는다 — get_group_constraints 하나면 충분하다.
+2. 후보를 거르는 데는 merged 값만 쓴다. members는 이름·preferred_menus를 답변에서 사람별로
+   설명하거나 8번의 "선호도 순" 정렬을 계산할 때만 참고하는 표시용 정보이며, members 안의
+   avoid_menus/health_notes/last_menu는 필터링에 절대 다시 쓰지 않는다 (merged에 이미 반영됨).
+   병합(최솟값/합집합/사장님 오버라이드)은 이미 다 계산되어 있으므로 직접 다시 계산하거나
+   판단하지 않는다.
+   - merged.override_by가 "사장님"이면 그걸로 끝이다. members 목록에서 다른 사람의 회피
+     메뉴나 특이사항을 보고 "충돌"이라거나 "문제가 있다"고 판단해 사용자에게 되묻지 않는다.
+     예를 들어 사장님이 회를 선호하고 다른 동행자가 회를 회피 목록에 올려둔 경우에도,
+     merged.avoid_menus는 이미 비어 있으므로(또는 사장님 기준으로 계산되어 있으므로) 그
+     동행자의 회피는 없는 것처럼 취급하고 곧바로 회 메뉴로 추천을 진행한다.
+3. merged.health_notes에 있는 각 특이사항을 search_menu_by_caution으로 검색해서, 해당되는 표준
+   메뉴를 후보에서 제외한다.
 4. list_restaurants로 식당을 조회하고, 식당이 부르는 메뉴명은 normalize_menu_names로 표준 메뉴명으로
    정규화한다. 한 식당의 메뉴 목록은 반드시 한 번의 호출로 전부 넘긴다 (메뉴 하나씩 따로 호출하지
    않는다 — 도구 호출 횟수 제한에 금방 도달한다). 정규화에 실패하면(standard_menu가 null) 그 메뉴는
@@ -97,6 +104,11 @@ SYSTEM_PROMPT = f"""너는 사내 점심 식당/메뉴 추천 담당 Agent다.
 - normalize_menu_names가 매칭에 실패하면(standard_menu가 null) 모르는 메뉴라고 답하고,
   관련 없어 보이는 다른 메뉴 정보를 끼워 넣지 않는다.
 
+[특정 식당 하나만 물어볼 때] (예: "OO식당 갈만해?", "비 오는 날 OO식당 갈만해?")
+그 식당까지의 거리를 사용자에게 되묻지 않는다 — list_restaurants를 호출하면 등록된 모든 식당의
+distance_km가 이미 들어있으니, 거기서 해당 식당을 찾아 거리를 확인한다. 이동시간을 판단해야 하면
+get_weather로 날씨를 확인하고 estimate_round_trip_minutes로 왕복 이동시간을 계산해서 답한다.
+
 [선호도·제약 수정 요청을 받았을 때]
 사용자가 본인이나 동행자의 선호·제약(preferred_menus, max_round_trip_minutes, avoid_menus,
 last_menu, health_notes 중 하나)을 바꿔달라고 하면, 망설이지 말고 즉시 update_user_preference를
@@ -121,7 +133,7 @@ last_menu, health_notes 중 하나)을 바꿔달라고 하면, 망설이지 말�
 class CompanionAuthorizationMiddleware(AgentMiddleware):
     """요청자 본인과, 이번 메시지에서 이름으로 언급된 동행자 외의 사용자 정보 조회를 차단한다."""
 
-    RESTRICTED_TOOLS = {"get_user_preference", "update_user_preference"}
+    RESTRICTED_TOOLS = {"get_user_preference", "get_group_constraints", "update_user_preference"}
 
     def __init__(self, requester_name: str, known_names: list[str]):
         self.requester_name = requester_name
@@ -132,21 +144,32 @@ class CompanionAuthorizationMiddleware(AgentMiddleware):
             return True
         return target_name in latest_message
 
+    def _target_names(self, args: dict) -> list[str]:
+        """get_user_preference/update_user_preference는 name(단수), get_group_constraints는
+        names(복수) 인자를 쓰므로 둘 다 리스트로 통일해서 돌려준다."""
+        if "names" in args:
+            return list(args["names"])
+        if "name" in args:
+            return [args["name"]]
+        return []
+
     def _refusal_or_none(self, request):
         """차단 대상이면 거절 메시지를, 통과할 호출이면 None을 돌려준다."""
         if request.tool_call["name"] not in self.RESTRICTED_TOOLS:
             return None
 
-        target_name = request.tool_call["args"].get("name", "")
+        target_names = self._target_names(request.tool_call["args"])
         last_human = next(
             (m for m in reversed(request.state["messages"]) if isinstance(m, HumanMessage)),
             None,
         )
         latest_message = get_text(last_human) if last_human else ""
 
-        if not self._is_authorized(target_name, latest_message):
-            print(f"[guard] 인가되지 않은 사용자 정보 조회 차단: {target_name}")
-            return f"'{target_name}'의 정보는 조회 권한이 없습니다. 본인 또는 이번 대화에서 언급한 동행자만 조회할 수 있습니다."
+        unauthorized = [n for n in target_names if not self._is_authorized(n, latest_message)]
+        if unauthorized:
+            print(f"[guard] 인가되지 않은 사용자 정보 조회 차단: {unauthorized}")
+            names_str = ", ".join(unauthorized)
+            return f"'{names_str}'의 정보는 조회 권한이 없습니다. 본인 또는 이번 대화에서 언급한 동행자만 조회할 수 있습니다."
         return None
 
     def wrap_tool_call(self, request, handler):
