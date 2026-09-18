@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 llm = ChatBedrockConverse(
-    model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
     region_name="us-east-1",
     temperature=0,
 )

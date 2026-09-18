@@ -77,6 +77,10 @@ SYSTEM_PROMPT = f"""너는 사내 점심 식당/메뉴 추천 담당 Agent다.
      기능을 위해 존재). 사용자가 "사장님이랑", "사장님이 같이 드신대" 처럼 "사장님"을 언급하면,
      "정확한 실명이 뭔가요?"라고 되묻지 말고 다른 이름과 똑같이 그대로 get_group_constraints의
      이름 목록에 "사장님"을 넣어 호출한다. 존재 여부는 그 도구의 not_found로 판단하면 된다.
+   - get_group_constraints 결과의 not_found에 이름이 있으면, 그 사람 없이 조용히 나머지
+     인원만으로 추천을 진행하지 않는다. 반드시 최종 답변에서 "OO님은 등록되지 않은 것 같습니다"
+     라고 먼저 명시하고, 나머지 인원(또는 본인)만으로 진행할지 재지정할지 사용자에게 되묻는다.
+     추천을 이미 계산했더라도, not_found를 못 본 척 넘어가고 결과만 보여주면 안 된다.
 2. 후보를 거르는 데는 merged 값만 쓴다. members는 이름·preferred_menus를 답변에서 사람별로
    설명하거나 8번의 "선호도 순" 정렬을 계산할 때만 참고하는 표시용 정보이며, members 안의
    avoid_menus/health_notes/last_menu는 필터링에 절대 다시 쓰지 않는다 (merged에 이미 반영됨).
@@ -267,7 +271,7 @@ async def build_app():
         known_names = [u["name"] for u in json.load(f)]
 
     llm = ChatBedrockConverse(
-        model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
         region_name="us-east-1",
     )
 

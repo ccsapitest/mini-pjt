@@ -6,9 +6,10 @@ chroma_db/
 __pycache__/
 *.pyc
 
-# 평가 실행 결과 (실행할 때마다 새로 생성됨, run_eval.py로 재생성 가능)
+# 평가 실행 결과 (실행할 때마다 새로 생성됨, run_eval.py/judge_eval.py로 재생성 가능)
 evaluation/eval_results.jsonl
 evaluation/eval_run.log
+evaluation/judge_results.jsonl
 
 # 미들웨어 실행 로그 (LoggingMiddleware, guards_refusal.py가 실행할 때마다 생성)
 agent_log.jsonl
