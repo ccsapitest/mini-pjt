@@ -17,7 +17,7 @@
   {"name": "김밥", "calories": 485, "sodium_mg": 750, "caution": "특이사항 없음"},
   {"name": "계란김밥", "calories": 500, "sodium_mg": 800, "caution": "계란 포함"},
   {"name": "김치찌개", "calories": 400, "sodium_mg": 1962, "caution": "고나트륨 주의"},
-  {"name": "돈까스", "calories": 500, "sodium_mg": 900, "caution": "고칼로리 주의"},
+  {"name": "돈까스", "aliases": ["돈가스"], "calories": 500, "sodium_mg": 900, "caution": "고칼로리 주의"},
   {"name": "치즈돈까스", "calories": 721, "sodium_mg": 1237, "caution": "고나트륨 주의, 유제품 포함"},
   {"name": "비빔만두", "calories": 400, "sodium_mg": 900, "caution": "특이사항 없음"},
   {"name": "냉국수", "calories": 400, "sodium_mg": 800, "caution": "특이사항 없음"},
@@ -26,5 +26,8 @@
   {"name": "회덮밥", "calories": 465, "sodium_mg": 1160, "caution": "날것 주의"},
   {"name": "뼈매운탕", "calories": 426, "sodium_mg": 1450, "caution": "고나트륨 주의 (추정치, 매운탕 일반 자료 기준)"},
   {"name": "물냉면", "calories": 500, "sodium_mg": 2600, "caution": "고나트륨 주의"},
-  {"name": "비빔냉면", "calories": 450, "sodium_mg": 1500, "caution": "고나트륨 주의"}
+  {"name": "비빔냉면", "calories": 450, "sodium_mg": 1500, "caution": "고나트륨 주의"},
+  {"name": "간장뼈찜", "calories": 490, "sodium_mg": 1140, "caution": "고나트륨 주의 (추정치, 간장 양념 갈비찜류 기준)"},
+  {"name": "두루치기", "calories": 436, "sodium_mg": 917, "caution": "고나트륨 주의"},
+  {"name": "만두", "calories": 325, "sodium_mg": 880, "caution": "고나트륨 주의 (추정치, 군만두 5개 기준)"}
 ]

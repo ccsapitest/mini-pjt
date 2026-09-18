@@ -77,7 +77,7 @@ class QueryGUI(tk.Tk):
         if self.agent_thread.error:
             self.after(0, lambda: self._append(f"[오류] 에이전트 초기화 실패: {self.agent_thread.error}\n"))
         else:
-            self.after(0, lambda: self._append("[안내] 준비 완료. 질문을 입력하세요 (예: 김삼성과 송덕삼이 점심 먹을만한 식당 추천해줘).\n"))
+            self.after(0, lambda: self._append("[안내] 준비 완료. 질문을 입력하세요 (예: 송덕삼이랑 점심 먹을만한 식당 추천해줘).\n"))
 
     def _append(self, text: str):
         self.output.configure(state="normal")

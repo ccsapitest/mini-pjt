@@ -218,7 +218,7 @@ def list_restaurants(max_distance_km: float = 0) -> str:
         r for r in RESTAURANTS if r["distance_km"] <= max_distance_km
     ]
     if not rows:
-        return f"왕복 거리 {max_distance_km}km 이내 등록된 식당이 없습니다."
+        return f"편도 거리 {max_distance_km}km 이내 등록된 식당이 없습니다."
     return json.dumps(rows, ensure_ascii=False)
 
 

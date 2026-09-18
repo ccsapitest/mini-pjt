@@ -88,5 +88,25 @@
       "last_menu": null,
       "health_notes": ["과식주의"]
     }
+  },
+  {
+    "name": "하대곤",
+    "preferred_menus": ["한식", "고기"],
+    "constraints": {
+      "max_round_trip_minutes": 20,
+      "avoid_menus": ["두루치기"],
+      "last_menu": null,
+      "health_notes": []
+    }
+  },
+  {
+    "name": "김선생",
+    "preferred_menus": ["김밥"],
+    "constraints": {
+      "max_round_trip_minutes": 30,
+      "avoid_menus": [],
+      "last_menu": "돈까스",
+      "health_notes": []
+    }
   }
 ]
