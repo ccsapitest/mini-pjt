@@ -8,6 +8,7 @@ src/ 안의 다른 파일은 전혀 건드리지 않고, agent.build_app()만 �
 HITL(선호도 수정) 승인 대기 중에는 입력창에 "승인" 또는 "거절"을 입력하면 된다.
 """
 import asyncio
+import json
 import os
 import sys
 import threading
@@ -21,6 +22,84 @@ from agent import build_app  # noqa: E402
 from guards import get_text  # noqa: E402
 from langchain_core.messages import HumanMessage  # noqa: E402
 from langgraph.types import Command  # noqa: E402
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+
+def _load_json(filename):
+    with open(os.path.join(DATA_DIR, filename), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _user_tooltip_text(user: dict) -> str:
+    c = user["constraints"]
+    lines = [
+        user["name"],
+        f"선호 메뉴: {', '.join(user['preferred_menus']) or '없음'}",
+        f"왕복 이동시간 상한: {c['max_round_trip_minutes']}분" if c["max_round_trip_minutes"] is not None else "왕복 이동시간 상한: 없음",
+        f"회피 메뉴: {', '.join(c['avoid_menus']) or '없음'}",
+        f"어제 먹은 메뉴: {c['last_menu'] or '없음'}",
+        f"특이사항: {', '.join(c['health_notes']) or '없음'}",
+    ]
+    return "\n".join(lines)
+
+
+def _restaurant_tooltip_text(restaurant: dict) -> str:
+    menu_names = ", ".join(m["name"] for m in restaurant["menus"])
+    lines = [
+        restaurant["name"],
+        restaurant["address"],
+        f"편도 거리: {restaurant['distance_km']}km",
+        f"메뉴: {menu_names}",
+    ]
+    return "\n".join(lines)
+
+
+class ListboxTooltip:
+    """리스트박스 항목에 마우스를 올리면 그 항목에 대한 정보를 풍선말로 보여준다."""
+
+    def __init__(self, listbox: tk.Listbox, text_for_index):
+        self.listbox = listbox
+        self.text_for_index = text_for_index
+        self.tip_window = None
+        self.shown_index = None
+        listbox.bind("<Motion>", self._on_motion)
+        listbox.bind("<Leave>", lambda e: self._hide())
+
+    def _on_motion(self, event):
+        index = self.listbox.nearest(event.y)
+        bbox = self.listbox.bbox(index)
+        if not bbox or not (bbox[1] <= event.y <= bbox[1] + bbox[3]):
+            self._hide()
+            return
+        if index == self.shown_index:
+            self._move(event)
+            return
+        self._hide()
+        text = self.text_for_index(index)
+        if not text:
+            return
+        self.shown_index = index
+        self.tip_window = tk.Toplevel(self.listbox)
+        self.tip_window.wm_overrideredirect(True)
+        label = tk.Label(
+            self.tip_window, text=text, justify=tk.LEFT, background="#ffffe0",
+            relief=tk.SOLID, borderwidth=1, padx=6, pady=4, font=("맑은 고딕", 9),
+        )
+        label.pack()
+        self._move(event)
+
+    def _move(self, event):
+        if self.tip_window:
+            x = self.listbox.winfo_rootx() + event.x + 16
+            y = self.listbox.winfo_rooty() + event.y + 12
+            self.tip_window.wm_geometry(f"+{x}+{y}")
+
+    def _hide(self):
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
+        self.shown_index = None
 
 
 class AgentLoopThread(threading.Thread):
@@ -51,15 +130,18 @@ class QueryGUI(tk.Tk):
     def __init__(self, agent_thread: AgentLoopThread):
         super().__init__()
         self.title("점심 추천 Agent - 자유 질의")
-        self.geometry("700x600")
+        self.geometry("1020x600")
         self.agent_thread = agent_thread
         self.thread_id = f"gui_{uuid.uuid4().hex[:8]}"
         self.pending_interrupt = False
 
-        self.output = scrolledtext.ScrolledText(self, wrap=tk.WORD, state="disabled")
+        chat_frame = tk.Frame(self)
+        chat_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.output = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, state="disabled")
         self.output.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        input_frame = tk.Frame(self)
+        input_frame = tk.Frame(chat_frame)
         input_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
 
         self.entry = tk.Entry(input_frame)
@@ -69,8 +151,38 @@ class QueryGUI(tk.Tk):
         tk.Button(input_frame, text="전송", command=self.on_send).pack(side=tk.LEFT, padx=(4, 0))
         tk.Button(input_frame, text="새 대화", command=self.on_reset).pack(side=tk.LEFT, padx=(4, 0))
 
+        self._build_reference_panel()
+
         self._append("[안내] 에이전트 준비 중... (MCP 서버 기동, 잠시 기다려주세요)\n")
         threading.Thread(target=self._wait_ready, daemon=True).start()
+
+    def _build_reference_panel(self):
+        """검증용 참고 패널 — 사용자/식당 목록을 보여주고, 마우스를 올리면 상세 정보를 풍선말로
+        띄운다. data/*.json을 직접 읽어서 표시만 하는 용도라, 에이전트가 세션 중에 임시로 바꾼
+        값(update_user_preference)은 반영되지 않는다 (그 값은 MCP 서버 프로세스 메모리에만 있다)."""
+        panel = tk.Frame(self, width=300)
+        panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
+        panel.pack_propagate(False)
+
+        users = _load_json("users.json")
+        restaurants = _load_json("restaurants.json")
+
+        tk.Label(panel, text="사용자 목록 (마우스오버: 상세)", anchor="w").pack(fill=tk.X)
+        user_list = tk.Listbox(panel, height=12, exportselection=False)
+        for u in users:
+            user_list.insert(tk.END, u["name"])
+        user_list.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        ListboxTooltip(user_list, lambda i: _user_tooltip_text(users[i]) if i < len(users) else "")
+
+        tk.Label(panel, text="식당 목록 (마우스오버: 상세)", anchor="w").pack(fill=tk.X)
+        restaurant_list = tk.Listbox(panel, height=12, exportselection=False)
+        for r in restaurants:
+            restaurant_list.insert(tk.END, r["name"])
+        restaurant_list.pack(fill=tk.BOTH, expand=True)
+        ListboxTooltip(
+            restaurant_list,
+            lambda i: _restaurant_tooltip_text(restaurants[i]) if i < len(restaurants) else "",
+        )
 
     def _wait_ready(self):
         self.agent_thread.ready.wait()

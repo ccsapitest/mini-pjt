@@ -1,7 +1,8 @@
 # mcp_server.py - 점심 식당 추천 Agent용 구조화 데이터 MCP 서버 (fastmcp)
 """노출하는 도구:
   - get_user_preference(name)                사용자 선호·제약 조회 (1명)
-  - get_group_constraints(names)             일행 전체 조회 + 병합(사장님 오버라이드 포함)까지 한 번에
+  - get_group_constraints(names)             일행 전체 조회 + 하드 필터(이동시간 상한, 특이사항)만 병합
+  - rank_restaurants(candidates, members, ...) 점수제로 식당 순위를 매겨 상위 N곳 반환
   - update_user_preference(name, field, value) 사용자 선호·제약 수정 (되돌리기 어려움, HITL 필수)
   - list_restaurants(max_distance_km)         식당 목록 조회
   - get_menu(name)                            표준 메뉴 조회 (칼로리/나트륨/주의사항)
@@ -12,7 +13,11 @@
 """
 import json
 import os
+import sys
 from fastmcp import FastMCP
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tools import _compute_minutes  # noqa: E402
 
 mcp = FastMCP("lunch-recommendation-data")
 
@@ -32,6 +37,15 @@ def _load(path):
 USERS = _load(USERS_PATH)
 RESTAURANTS = _load(RESTAURANTS_PATH)
 MENUS = _load(MENUS_PATH)
+
+# 표준 메뉴 이름 -> 카테고리 목록 (예: "돈까스" -> ["일식"]). preferred_menus/avoid_menus는
+# "한식"/"고기" 같은 카테고리로도, "뼈해장국" 같은 정확한 메뉴명으로도 올 수 있어서
+# rank_restaurants에서 두 가지 다 매칭해야 한다.
+MENU_CATEGORIES = {m["name"]: m.get("categories", []) for m in MENUS}
+
+BOSS_WEIGHT = 20
+POINTS_PER_MATCH = 10
+DISTANCE_PENALTY_PER_5MIN = 5
 
 UPDATABLE_FIELDS = {"preferred_menus", "max_round_trip_minutes", "avoid_menus", "last_menu", "health_notes"}
 CONSTRAINT_FIELDS = {"max_round_trip_minutes", "avoid_menus", "last_menu", "health_notes"}
@@ -84,26 +98,7 @@ def get_user_preference(name: str) -> str:
     return f"'{name}' 사용자를 찾을 수 없습니다. 등록된 사용자: {names}"
 
 
-@mcp.tool()
-def get_group_constraints(names: list[str]) -> str:
-    """일행 전체(요청자 본인 포함)의 선호·제약을 조회하고, 그룹 기준으로 병합까지 끝낸 결과를 돌려준다.
-
-    사람마다 get_user_preference를 따로 부르고 병합 규칙(최솟값/합집합/사장님 오버라이드)을
-    직접 계산하지 않는다 — 이 도구가 이미 다 계산해서 "merged" 안에 넣어준다. 그룹 추천을 할
-    때는 반드시 이 도구 하나만 부르고, merged 값을 그대로 필터링 기준으로 쓴다.
-
-    병합 규칙 (이미 적용되어 있음, 다시 계산하지 않는다):
-    - 동행자 중 "사장님"이 있으면, 사장님 외 다른 모든 사람의 선호·제약은 전부 무시한다.
-      "선호 vs 회피"처럼 정면으로 충돌하는 것처럼 보여도 예외 없이 사장님만 따른다
-      (merged.override_by 가 "사장님"으로 표시된다). 이때 members 목록에서도 사장님이
-      아닌 사람들의 avoid_menus/health_notes/last_menu는 아예 빠지고 이름과 선호메뉴만
-      남는다 — 애초에 참고할 회피 정보가 없으니 "충돌"을 재해석할 필요도 없다.
-    - 사장님이 없으면: 왕복 이동시간 상한은 값이 있는 사람들 중 최솟값(없는 사람은 제외),
-      회피 메뉴·어제 먹은 메뉴·특이사항은 전원의 값을 합집합으로 합친다.
-
-    Args:
-        names: 요청자 본인을 포함한 일행 전체의 이름 목록
-    """
+def _lookup_members(names: list[str]) -> tuple[list[dict], list[str]]:
     members = []
     not_found = []
     for name in names:
@@ -112,51 +107,72 @@ def get_group_constraints(names: list[str]) -> str:
             not_found.append(name)
         else:
             members.append(user)
+    return members, not_found
 
+
+def _hard_filters(members: list[dict]) -> dict:
+    """max_round_trip_minutes/health_notes만 계산한다 (avoid_menus/last_menu/preferred_menus는
+    더 이상 여기서 다루지 않는다 — rank_restaurants가 이름만 받아서 내부에서 직접 점수로 반영한다)."""
+    boss = next((u for u in members if u["name"] == "사장님"), None)
+    if boss is not None:
+        return {
+            "override_by": "사장님",
+            "max_round_trip_minutes": boss["constraints"]["max_round_trip_minutes"],
+            "health_notes": [
+                {"note": n, "who": ["사장님"]} for n in boss["constraints"]["health_notes"]
+            ],
+        }
+    caps = [
+        u["constraints"]["max_round_trip_minutes"]
+        for u in members
+        if u["constraints"]["max_round_trip_minutes"] is not None
+    ]
+    notes_to_who: dict[str, list[str]] = {}
+    for u in members:
+        for n in u["constraints"]["health_notes"]:
+            notes_to_who.setdefault(n, []).append(u["name"])
+    return {
+        "override_by": None,
+        "max_round_trip_minutes": min(caps) if caps else None,
+        "health_notes": [
+            {"note": n, "who": who} for n, who in sorted(notes_to_who.items())
+        ],
+    }
+
+
+@mcp.tool()
+def get_group_constraints(names: list[str]) -> str:
+    """일행 전체(요청자 본인 포함)의 하드 필터(이동시간 상한, 건강 특이사항)만 조회한다.
+
+    이 도구는 일부러 사람별 선호·회피·최근 메뉴(preferred_menus/avoid_menus/last_menu)는
+    돌려주지 않는다 — 그건 점수 계산용이라 rank_restaurants가 이름만 받아서 내부에서 직접
+    처리한다. 여기서 받는 merged.health_notes는 search_menu_by_caution으로 검색해 해당 표준
+    메뉴를 후보에서 제외하는 데 쓰고, merged.max_round_trip_minutes는 답변에서 안내하는 용도로만
+    쓴다 (실제 필터링은 rank_restaurants가 이름을 받아 내부에서 다시 계산해 적용한다).
+
+    merged.health_notes는 문자열 배열이 아니라 {"note": "날것 주의", "who": ["최민준"]} 형태의
+    객체 배열이다 — 누구의 특이사항인지 반드시 이 who를 보고 판단하고, "일행 모두"나 "두 분 다"처럼
+    함부로 일반화하지 않는다. who에 없는 사람에게는 그 특이사항이 없는 것이다.
+
+    병합 규칙 (이미 적용되어 있음, 다시 계산하지 않는다):
+    - 동행자 중 "사장님"이 있으면, 이동시간 상한·건강 특이사항은 사장님 기준으로만 정해진다
+      (merged.override_by가 "사장님"으로 표시됨). 다른 동행자의 회피 메뉴나 특이사항 때문에
+      "충돌"이라고 되묻지 않는다 — 그 사람들 정보는 애초에 이 도구가 보여주지 않는다.
+    - 사장님이 없으면: 이동시간 상한은 값이 있는 사람들 중 최솟값, 건강 특이사항은 전원의
+      값을 모으되 각 항목마다 who로 누구 것인지 표시한다.
+
+    Args:
+        names: 요청자 본인을 포함한 일행 전체의 이름 목록
+    """
+    members, not_found = _lookup_members(names)
     if not members:
         registered = ", ".join(u["name"] for u in USERS)
         return json.dumps(
             {"not_found": not_found, "merged": None, "note": f"등록된 사용자: {registered}"},
             ensure_ascii=False,
         )
-
-    boss = next((u for u in members if u["name"] == "사장님"), None)
-    if boss is not None:
-        merged = {
-            "override_by": "사장님",
-            "preferred_menus": boss["preferred_menus"],
-            "max_round_trip_minutes": boss["constraints"]["max_round_trip_minutes"],
-            "avoid_menus": boss["constraints"]["avoid_menus"],
-            "last_menus": [boss["constraints"]["last_menu"]] if boss["constraints"]["last_menu"] else [],
-            "health_notes": boss["constraints"]["health_notes"],
-        }
-        # 사장님 오버라이드 시에는 다른 동행자의 회피 메뉴/특이사항/최근 메뉴를 응답에서
-        # 아예 빼버린다. 모델이 이 원본 데이터를 보면 merged가 이미 무시하기로 한 "충돌"을
-        # 스스로 다시 찾아내서 추천을 거부하는 문제가 있었기 때문이다 (프롬프트 지시만으로는
-        # 해결되지 않음 — 데이터 자체를 안 보이게 해야 한다).
-        members = [
-            u if u["name"] == "사장님" else {"name": u["name"], "preferred_menus": u["preferred_menus"]}
-            for u in members
-        ]
-    else:
-        caps = [
-            u["constraints"]["max_round_trip_minutes"]
-            for u in members
-            if u["constraints"]["max_round_trip_minutes"] is not None
-        ]
-        merged = {
-            "override_by": None,
-            "preferred_menus": sorted({m for u in members for m in u["preferred_menus"]}),
-            "max_round_trip_minutes": min(caps) if caps else None,
-            "avoid_menus": sorted({m for u in members for m in u["constraints"]["avoid_menus"]}),
-            "last_menus": sorted({
-                u["constraints"]["last_menu"] for u in members if u["constraints"]["last_menu"]
-            }),
-            "health_notes": sorted({n for u in members for n in u["constraints"]["health_notes"]}),
-        }
-
     return json.dumps(
-        {"not_found": not_found, "members": members, "merged": merged},
+        {"not_found": not_found, "merged": _hard_filters(members)},
         ensure_ascii=False,
     )
 
@@ -220,6 +236,136 @@ def list_restaurants(max_distance_km: float = 0) -> str:
     if not rows:
         return f"편도 거리 {max_distance_km}km 이내 등록된 식당이 없습니다."
     return json.dumps(rows, ensure_ascii=False)
+
+
+def _matches(target: str, standard_menu_name: str) -> bool:
+    """avoid_menus/preferred_menus/last_menu의 값(target)이 표준 메뉴 이름이나
+    카테고리("한식", "고기" 등) 어느 쪽으로 와도 그 표준 메뉴에 매칭되는지 판단한다."""
+    if target == standard_menu_name:
+        return True
+    return target in MENU_CATEGORIES.get(standard_menu_name, [])
+
+
+@mcp.tool()
+def rank_restaurants(
+    names: list[str] | str,
+    candidates: list[dict] | str,
+    weather: str = "맑음",
+    mode: str = "도보",
+    top_n: int = 3,
+    ignore_time_cap: bool = False,
+) -> str:
+    """일행 이름과 식당 후보만 주면, 하드 필터·점수 계산·순위 결정을 전부 이 도구가 끝내서
+    상위 N곳을 돌려준다. 호출한 뒤에는 이 결과를 그대로 답변에 옮기면 된다 (다시 필터링하거나
+    직접 순위를 재계산하지 않는다).
+
+    일행 각자의 preferred_menus/avoid_menus/last_menu와 사장님 가중치(20)는 이 도구가 이름으로
+    직접 조회해서 내부에서만 쓴다 — get_group_constraints처럼 그 값을 텍스트로 돌려주지 않는다.
+    그러니 "이 사람이 이걸 회피하니까 문제 아닌가?" 같은 판단을 스스로 하지 않는다 — 그 데이터를
+    볼 필요도, 볼 수도 없다. 사장님이 일행에 있으면 다른 사람의 회피/최근 메뉴가 이 식당에
+    있어도 그냥 이 도구가 알아서 가중치 계산에 반영할 뿐이니, 결과가 나오기 전에 미리
+    "괜찮을까요?"라고 되묻지 않는다.
+
+    처리 순서:
+    1. 하드 필터: 이동시간 상한(사장님이 있으면 사장님 기준, 없으면 최솟값)을 넘는 식당은
+       제외한다 (health_notes 기반 주의 메뉴 제외는 이 도구를 부르기 전에
+       search_menu_by_caution으로 미리 처리해서, candidates의 standard_menus에서
+       빼놓고 넘긴다 — 이 도구는 그 목록을 그대로 신뢰한다).
+    2. 점수 계산: 살아남은 각 식당에 대해, 일행 각자마다 다음을 한 번씩만 적용한다
+       (같은 카테고리 메뉴가 여러 개 있어도 중복 가점/감점하지 않는다). 사장님이 있으면
+       사장님의 가중치는 20, 나머지는 1이다:
+       - 그 식당에 preferred_menus와 매칭되는(정확한 이름 또는 카테고리) 표준 메뉴가
+         하나라도 있으면 +10 * weight
+       - avoid_menus와 매칭되는 메뉴가 하나라도 있으면 -10 * weight
+       - last_menu와 매칭되는 메뉴가 있으면 -10 * weight
+       거리 페널티: mode가 "도보"일 때만, 편도 이동시간 5분마다 -5점 (대중교통/차량은 감점 없음).
+    3. 점수 내림차순으로 정렬해 상위 N곳만 반환한다.
+
+    Args:
+        names: 요청자 본인을 포함한 일행 전체의 이름 목록 (get_group_constraints에 넘긴 것과 동일)
+        candidates: [{"name": 식당명, "distance_km": 편도 거리,
+                      "standard_menus": [이미 정규화되고 주의 메뉴는 제외된 표준 메뉴명 목록]}]
+        weather: 오늘 날씨 (왕복 이동시간 계산에 사용)
+        mode: 이동수단 ("도보", "대중교통", "차량")
+        top_n: 상위 몇 곳을 반환할지 (기본 3, 사용자가 다른 개수를 요청하면 그 값으로)
+        ignore_time_cap: True면 이동시간 상한 하드 필터를 이번 호출에서만 건너뛴다
+            ("OO 이동시간 제한 무시하고 추천해줘"처럼 이번 요청 한정 완화일 때만 True로 준다)
+    """
+    # 모델이 가끔 리스트 인자를 JSON 문자열로 직렬화해서 넘길 때가 있다 (예: candidates를
+    # '[{"name": ...}]' 같은 문자열로 전달). 스키마에서 바로 거부하지 않고 여기서 파싱해
+    # 구제한다 — 어차피 그 다음 코드가 기대하는 모양은 리스트/딕셔너리이기 때문이다.
+    if isinstance(names, str):
+        names = json.loads(names)
+    if isinstance(candidates, str):
+        candidates = json.loads(candidates)
+
+    raw_members, not_found = _lookup_members(names)
+    boss = next((u for u in raw_members if u["name"] == "사장님"), None)
+    members = [
+        {
+            "name": u["name"],
+            "preferred_menus": u["preferred_menus"],
+            "avoid_menus": u["constraints"]["avoid_menus"],
+            "last_menu": u["constraints"]["last_menu"],
+            "weight": BOSS_WEIGHT if u["name"] == "사장님" else 1,
+        }
+        for u in raw_members
+    ]
+    if boss is not None:
+        max_round_trip_minutes = boss["constraints"]["max_round_trip_minutes"]
+    else:
+        caps = [
+            u["constraints"]["max_round_trip_minutes"]
+            for u in raw_members
+            if u["constraints"]["max_round_trip_minutes"] is not None
+        ]
+        max_round_trip_minutes = min(caps) if caps else None
+    if ignore_time_cap:
+        max_round_trip_minutes = None
+
+    ranked = []
+    for c in candidates:
+        if not c.get("standard_menus"):
+            continue  # 안전하게 먹을 수 있는 메뉴가 하나도 없는 식당은 후보에서 제외
+        minutes, multiplier = _compute_minutes(c["distance_km"], weather, mode)
+        if max_round_trip_minutes is not None and minutes > max_round_trip_minutes:
+            continue
+
+        score = 0
+        breakdown = []
+        for m in members:
+            weight = m.get("weight", 1)
+            std_menus = c.get("standard_menus", [])
+            if any(_matches(p, sm) for p in m.get("preferred_menus", []) for sm in std_menus):
+                score += POINTS_PER_MATCH * weight
+                breakdown.append(f"{m['name']} 선호 메뉴 매칭 +{POINTS_PER_MATCH * weight}")
+            if any(_matches(a, sm) for a in m.get("avoid_menus", []) for sm in std_menus):
+                score -= POINTS_PER_MATCH * weight
+                breakdown.append(f"{m['name']} 회피 메뉴 존재 -{POINTS_PER_MATCH * weight}")
+            last = m.get("last_menu")
+            if last and any(_matches(last, sm) for sm in std_menus):
+                score -= POINTS_PER_MATCH * weight
+                breakdown.append(f"{m['name']} 어제 먹은 메뉴 존재 -{POINTS_PER_MATCH * weight}")
+
+        if mode == "도보":
+            one_way_minutes = minutes / 2
+            penalty_units = int(one_way_minutes // 5)
+            distance_penalty = penalty_units * DISTANCE_PENALTY_PER_5MIN
+            if distance_penalty:
+                score -= distance_penalty
+                breakdown.append(f"편도 {one_way_minutes:.0f}분 이동 -{distance_penalty}")
+
+        ranked.append({
+            "name": c["name"],
+            "distance_km": c["distance_km"],
+            "round_trip_minutes": minutes,
+            "standard_menus": c.get("standard_menus", []),
+            "score": score,
+            "score_breakdown": breakdown,
+        })
+
+    ranked.sort(key=lambda r: r["score"], reverse=True)
+    return json.dumps(ranked[:top_n], ensure_ascii=False)
 
 
 @mcp.tool()

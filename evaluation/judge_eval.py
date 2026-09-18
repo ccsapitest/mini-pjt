@@ -22,7 +22,7 @@ RESULTS_PATH = os.path.join(BASE, "eval_results.jsonl")
 OUT_PATH = os.path.join(BASE, "judge_results.jsonl")
 
 judge_llm = ChatBedrockConverse(
-    model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    model="global.anthropic.claude-haiku-4-5-20251001-v1:0",
     region_name="us-east-1",
     temperature=0,
 )
